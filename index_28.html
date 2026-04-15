@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>X Post Manager</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@300;400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body,#root{height:100%;overflow:hidden}
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#2a2a32;border-radius:3px}
+textarea:focus,input:focus,select:focus{outline:none;border-color:#e11d48!important}
+button{cursor:pointer;transition:all .1s;font-family:'Noto Sans JP',sans-serif}button:hover{opacity:.88}button:active{transform:scale(.97)}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+input[type="file"]{display:none}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script type="text/babel">
+const { useState, useCallback, useRef } = React;
+
+const MAX_CHARS = 280;
+const gid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+function natSort(a, b) {
+  return a.name.toLowerCase().localeCompare(b.name.toLowerCase(), undefined, { numeric: true, sensitivity: "base" });
+}
+
+const RISK = [
+  { p: /無料|タダ|0円/g, l: "「無料」系", v: "warn" },
+  { p: /稼げる|儲かる|月収|副業で.*万/g, l: "収益訴求", v: "danger" },
+  { p: /今だけ|期間限定|残りわずか/g, l: "緊急性煽り", v: "warn" },
+  { p: /LINE登録|公式LINE|LINE追加/g, l: "LINE誘導", v: "danger" },
+  { p: /DMください|DM送って/g, l: "DM誘導", v: "warn" },
+  { p: /保証|確実|絶対/g, l: "断定表現", v: "danger" },
+];
+const CATS = ["レビュー", "比較", "紹介", "セール", "その他"];
+
+const mkTweet = () => ({ id: gid(), content: "", images: [], imgSlots: 1, affiliateUrl: "" });
+const mkThread = () => ({ id: gid(), tweets: [mkTweet()], category: "その他", createdAt: Date.now(), updatedAt: Date.now(), name: "" });
+
+function readFile(file) {
+  return new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => res(""); r.readAsDataURL(file); });
+}
+
+function RiskBadges({ content }) {
+  const hits = RISK.map((r) => { const m = content.match(r.p); return m ? { ...r, m } : null; }).filter(Boolean);
+  if (!hits.length) return null;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
+      {hits.map((h, i) => (
+        <span key={i} style={{ fontSize: 10, padding: "2px 7px", borderRadius: 4, fontWeight: 600, background: h.v === "danger" ? "#2d0a0a" : "#2d1f0a", color: h.v === "danger" ? "#f87171" : "#fbbf24", border: "1px solid " + (h.v === "danger" ? "#7f1d1d" : "#78350f") }}>
+          {h.v === "danger" ? "⚠" : "△"} {h.l}: {h.m.join(", ")}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function ImgGrid({ imgs }) {
+  const n = imgs.length;
+  if (n === 0) return null;
+  if (n === 1) return (<div style={{ borderRadius: 12, overflow: "hidden", border: "1px solid #2f3336", marginBottom: 8 }}><img src={imgs[0]} alt="" style={{ width: "100%", maxHeight: 320, objectFit: "contain", display: "block", background: "#000" }} /></div>);
+  const h = n > 2 ? 240 : 200;
+  const L = {
+    2: [{ top: 0, left: 0, width: "49.5%", height: "100%" }, { top: 0, left: "50.5%", width: "49.5%", height: "100%" }],
+    3: [{ top: 0, left: 0, width: "49.5%", height: "100%" }, { top: 0, left: "50.5%", width: "49.5%", height: "49%" }, { top: "51%", left: "50.5%", width: "49.5%", height: "49%" }],
+    4: [{ top: 0, left: 0, width: "49.5%", height: "49%" }, { top: 0, left: "50.5%", width: "49.5%", height: "49%" }, { top: "51%", left: 0, width: "49.5%", height: "49%" }, { top: "51%", left: "50.5%", width: "49.5%", height: "49%" }],
+  };
+  const lay = L[Math.min(n, 4)];
+  return (<div style={{ position: "relative", width: "100%", height: h, borderRadius: 12, overflow: "hidden", border: "1px solid #2f3336", marginBottom: 8 }}>{imgs.slice(0, 4).map((src, i) => <div key={i} style={{ position: "absolute", ...lay[i], overflow: "hidden" }}><img src={src} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} /></div>)}</div>);
+}
+
+function Preview({ tweets, show, onClose }) {
+  if (!show) return null;
+  return (
+    <div style={S.overlay} onClick={onClose}><div style={S.modal} onClick={(e) => e.stopPropagation()}>
+      <div style={S.mHead}><span style={{ fontSize: 15, fontWeight: 700, color: "#e7e9ea" }}>スレッドプレビュー</span><span style={{ fontSize: 12, color: "#71767b" }}>{tweets.length}ツイート</span><button onClick={onClose} style={S.mClose}>✕</button></div>
+      <div style={S.mBody}>{tweets.map((tw, i) => (
+        <div key={tw.id} style={{ display: "flex", padding: "12px 16px 4px", gap: 12 }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}><div style={S.xAv}>A</div>{i < tweets.length - 1 && <div style={{ width: 2, flex: 1, background: "#333639", marginTop: 4 }} />}</div>
+          <div style={{ flex: 1, minWidth: 0, paddingBottom: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 2 }}><span style={{ fontWeight: 700, fontSize: 14, color: "#e7e9ea" }}>アカウント名</span><span style={{ fontSize: 13, color: "#71767b" }}>@your_handle · 今</span></div>
+            {i > 0 && <div style={{ fontSize: 13, color: "#71767b", marginBottom: 2 }}>返信先: <span style={{ color: "#1d9bf0" }}>@your_handle</span></div>}
+            <div style={{ fontSize: 14, lineHeight: 1.6, color: "#e7e9ea", whiteSpace: "pre-wrap", wordBreak: "break-word", marginBottom: 8 }}>{tw.content || <span style={{ color: "#536471" }}>（テキスト未入力）</span>}</div>
+            <ImgGrid imgs={tw.images} />
+            {tw.affiliateUrl && <div style={{ border: "1px solid #2f3336", borderRadius: 12, padding: "10px 14px", marginBottom: 8 }}><div style={{ fontSize: 12, color: "#71767b" }}>{"🔗 " + (() => { try { return new URL(tw.affiliateUrl).hostname; } catch { return "link"; } })()}</div></div>}
+            <div style={{ display: "flex", gap: 32, paddingTop: 4 }}>{["💬","🔁","❤️","📊","↗"].map((c, j) => <span key={j} style={{ fontSize: 14, color: "#71767b" }}>{c}</span>)}</div>
+          </div>
+        </div>
+      ))}</div>
+    </div></div>
+  );
+}
+
+function UrlImporter({ onAdd, flash }) {
+  const [text, setText] = useState("");
+  const addUrls = () => {
+    const lines = text.split(/[\n,]+/).map((l) => l.trim()).filter((l) => /^https?:\/\/.+/i.test(l));
+    if (lines.length === 0) { flash("有効なURLが見つかりません"); return; }
+    const unique = [...new Set(lines)];
+    const imgs = unique.map((url, i) => {
+      const parts = url.split("/");
+      const fname = decodeURIComponent(parts[parts.length - 1]?.split("?")[0] || ("image_" + (i + 1)));
+      return { id: gid(), name: fname, dataUrl: url };
+    });
+    onAdd(imgs);
+    flash(imgs.length + "件のURLをライブラリに追加しました");
+    setText("");
+  };
+  return (
+    <div style={S.scraperWrap}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: "#e7e9ea", marginBottom: 8 }}>🌐 画像URLから取得</div>
+      <div style={{ fontSize: 11, color: "#71767b", marginBottom: 8, lineHeight: 1.6 }}>
+        画像のURLを1行に1つずつ貼り付けてください。
+        <br />💡 ブラウザで画像を右クリック →「画像アドレスをコピー」で取得できます。
+        <br />💡 同梱のPythonスクリプトでページ内の画像URLを一括抽出できます。
+      </div>
+      <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder={"https://example.com/img/photo1.jpg\nhttps://example.com/img/photo2.png\nhttps://example.com/img/photo3.webp"} style={S.urlTa} rows={4} />
+      <button onClick={addUrls} disabled={!text.trim()} style={{ ...S.aBtn, width: "100%", marginTop: 8, opacity: text.trim() ? 1 : 0.4 }}>{"📥 ライブラリに追加"}</button>
+      <div style={{ fontSize: 10, color: "#4b5563", marginTop: 6, lineHeight: 1.5 }}>※ Claude上では外部画像は表示されません。GitHub Pages等にデプロイすると正常に表示されます。</div>
+    </div>
+  );
+}
+
+function ImageLib({ images, onUpload, onUploadFolder, onRemove, onInsert, onBulkAdd, flash }) {
+  const fRef = useRef(null); const dRef = useRef(null);
+  const [showUrl, setShowUrl] = useState(false);
+  return (<div>
+    <div style={S.libW}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}><span style={{ fontSize: 13, fontWeight: 700, color: "#e7e9ea" }}>🖼 画像ライブラリ</span><span style={{ fontSize: 11, color: "#6b7280" }}>{images.length}枚</span></div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+        <button onClick={() => fRef.current && fRef.current.click()} style={S.libBtn}>＋ ファイル追加</button>
+        <button onClick={() => dRef.current && dRef.current.click()} style={S.libBtnP}>📁 フォルダ一括</button>
+        <button onClick={() => setShowUrl(!showUrl)} style={S.libBtnU}>{"🌐 URL取得"}</button>
+        <input ref={fRef} type="file" accept="image/*" multiple style={{ display: "none" }} onChange={(e) => onUpload(e.target.files)} />
+        <input ref={dRef} type="file" accept="image/*" multiple webkitdirectory="" directory="" style={{ display: "none" }} onChange={(e) => onUploadFolder(e.target.files)} />
+      </div>
+      {images.length === 0 && <div style={{ fontSize: 11, color: "#444", textAlign: "center", padding: "12px 0" }}>画像をアップロードしてください</div>}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>{images.map((img, idx) => (
+        <div key={img.id} style={{ position: "relative", width: 68, height: 68, borderRadius: 8, overflow: "hidden", border: "1px solid #2a2a32", cursor: "pointer" }}
+          onMouseEnter={(e) => { var o = e.currentTarget.querySelector("[data-ov]"); if(o) o.style.opacity=1; }}
+          onMouseLeave={(e) => { var o = e.currentTarget.querySelector("[data-ov]"); if(o) o.style.opacity=0; }}>
+          <img src={img.dataUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+          <div data-ov="1" style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.55)", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, opacity: 0, transition: "opacity .15s" }}>
+            <button onClick={() => onInsert(img)} style={{ background: "#16a34a", border: "none", borderRadius: 4, color: "#fff", fontSize: 13, width: 24, height: 24 }}>＋</button>
+            <button onClick={() => onRemove(img.id)} style={{ background: "#dc2626", border: "none", borderRadius: 4, color: "#fff", fontSize: 11, width: 24, height: 24 }}>✕</button>
+          </div>
+          <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "rgba(0,0,0,.7)", fontSize: 8, color: "#aaa", padding: "1px 3px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{"#"+(idx+1)+" "+img.name}</div>
+        </div>
+      ))}</div>
+    </div>
+    {showUrl && <UrlImporter onAdd={onBulkAdd} flash={flash} />}
+  </div>);
+}
+
+function App() {
+  const [threads, setThreads] = useState([]);
+  const [history, setHistory] = useState([]);
+  const [selId, setSelId] = useState(null);
+  const [tab, setTab] = useState("threads");
+  const [showPrev, setShowPrev] = useState(false);
+  const [showHist, setShowHist] = useState(null);
+  const [toast, setToast] = useState("");
+  const [images, setImages] = useState([]);
+  const [actTw, setActTw] = useState(null);
+  const sfRef = useRef(null);
+  const sel = threads.find((t) => t.id === selId);
+  const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 2500); };
+
+  const processFiles = async (fl) => {
+    const files = Array.from(fl).filter((f) => f.type.startsWith("image/")); if (!files.length) return;
+    files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+    const arr = []; for (const f of files) { const d = await readFile(f); if (d) arr.push({ id: gid(), name: f.name, dataUrl: d }); }
+    setImages((p) => [...p, ...arr].sort(natSort)); flash(arr.length + "枚を追加しました");
+  };
+  const addScraped = (ni) => setImages((p) => [...p, ...ni].sort(natSort));
+  const insertToActive = (img) => {
+    if (!sel) return; const tid = actTw || sel.tweets[0]?.id; if (!tid) return;
+    setThreads((p) => p.map((t) => { if (t.id !== selId) return t; return { ...t, updatedAt: Date.now(), tweets: t.tweets.map((tw) => { if (tw.id !== tid) return tw; if (tw.images.length >= tw.imgSlots) { flash("上限です"); return tw; } return { ...tw, images: [...tw.images, img.dataUrl] }; }) }; }));
+  };
+  const bulkAssign = () => {
+    if (!sel || !images.length) return; let idx = 0;
+    const nw = sel.tweets.map((tw) => { const tk = Math.min(tw.imgSlots, images.length - idx); const pk = images.slice(idx, idx + tk).map((im) => im.dataUrl); idx += tk; return { ...tw, images: pk }; });
+    const ex = []; while (idx < images.length) { const tw = mkTweet(); const tk = Math.min(tw.imgSlots, images.length - idx); tw.images = images.slice(idx, idx + tk).map((im) => im.dataUrl); ex.push(tw); idx += tk; }
+    updateThread("tweets", [...nw, ...ex]); flash(images.length + "枚を割り当てました");
+  };
+  const createThread = () => { const t = mkThread(); setThreads((p) => [t, ...p]); setSelId(t.id); setActTw(t.tweets[0]?.id); setTab("threads"); };
+  const reuseHist = (e) => { const t = { ...mkThread(), tweets: e.tweets.map((tw) => ({ ...tw, id: gid(), images: [...(tw.images||[])] })), category: e.category, name: (e.name||"履歴")+"を再利用" }; setThreads((p) => [t, ...p]); setSelId(t.id); setActTw(t.tweets[0]?.id); setTab("threads"); flash("履歴から作成"); };
+  const markSent = () => { if (!sel) return; setHistory((p) => [{ id: gid(), name: sel.name||sel.tweets[0]?.content?.slice(0,40)||"無題", category: sel.category, tweets: sel.tweets.map((tw) => ({...tw,id:gid()})), sentAt: Date.now(), tweetCount: sel.tweets.length, imageCount: sel.tweets.reduce((a,tw)=>a+tw.images.length,0) }, ...p]); setThreads((p) => p.filter((t)=>t.id!==sel.id)); setSelId(null); flash("送信履歴に記録"); };
+  const delThread = (id) => { setThreads((p) => p.filter((t) => t.id !== id)); if (selId === id) setSelId(null); };
+  const updateThread = useCallback((f, v) => { setThreads((p) => p.map((t) => t.id === selId ? { ...t, [f]: v, updatedAt: Date.now() } : t)); }, [selId]);
+  const updateTweet = useCallback((tid, f, v) => { setThreads((p) => p.map((t) => { if (t.id !== selId) return t; return { ...t, updatedAt: Date.now(), tweets: t.tweets.map((tw) => tw.id === tid ? { ...tw, [f]: v } : tw) }; })); }, [selId]);
+  const addTweet = () => { if (sel) updateThread("tweets", [...sel.tweets, mkTweet()]); };
+  const removeTweet = (tid) => { if (sel && sel.tweets.length > 1) updateThread("tweets", sel.tweets.filter((tw) => tw.id !== tid)); };
+  const moveTweet = (i, dir) => { if (!sel) return; const a = [...sel.tweets]; const t = i + dir; if (t < 0 || t >= a.length) return; [a[i], a[t]] = [a[t], a[i]]; updateThread("tweets", a); };
+  const removeImg = (tid, ii) => { setThreads((p) => p.map((t) => { if (t.id !== selId) return t; return { ...t, updatedAt: Date.now(), tweets: t.tweets.map((tw) => tw.id === tid ? { ...tw, images: tw.images.filter((_,j)=>j!==ii) } : tw) }; })); };
+  const exportAll = () => { const d = JSON.stringify({ threads, history }, null, 2); const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([d])); a.download = "xpost_backup_"+new Date().toISOString().slice(0,10)+".json"; a.click(); };
+  const importAll = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = (ev) => { try { const d = JSON.parse(ev.target.result); if(d.threads) setThreads(d.threads); if(d.history) setHistory(d.history); setSelId(null); flash("復元しました"); } catch { alert("読み込み失敗"); } }; r.readAsText(f); };
+  const copyThread = () => { if (!sel) return; navigator.clipboard?.writeText(sel.tweets.map((tw, i) => "── ツイート"+(i+1)+" ──\n"+tw.content+(tw.affiliateUrl?"\n"+tw.affiliateUrl:"")).join("\n\n")); flash("コピーしました"); };
+  const copySingle = (tw) => { navigator.clipboard?.writeText(tw.content+(tw.affiliateUrl?"\n"+tw.affiliateUrl:"")); flash("コピー"); };
+  const bSum = sel ? "ファイル名順に"+images.length+"枚 → 計"+sel.tweets.reduce((a,tw)=>a+tw.imgSlots,0)+"スロット" : "";
+
+  return (
+    <div style={S.root}>
+      {toast && <div style={S.toast}>{toast}</div>}
+      <header style={S.header}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:20,color:"#e11d48"}}>✦</span><span style={{fontSize:16,fontWeight:800,letterSpacing:"-0.03em"}}>X Post Manager</span><span style={S.ver}>v7</span></div>
+        <div style={{display:"flex",gap:6}}><button onClick={exportAll} style={S.hBtn}>📥 バックアップ</button><label style={S.hBtn}>📤 復元<input type="file" accept=".json" onChange={importAll} /></label></div>
+      </header>
+      <div style={S.layout}>
+        <aside style={S.side}>
+          <div style={S.tabs}>{["threads","history"].map((k) => (<button key={k} onClick={()=>setTab(k)} style={{...S.tabBtn,...(tab===k?{color:"#e11d48",borderBottomColor:"#e11d48"}:{})}}>{k==="threads"?"スレッド":"送信履歴 ("+history.length+")"}</button>))}</div>
+          {tab === "threads" ? (<>
+            <button onClick={createThread} style={S.newBtn}>＋ 新規スレッド</button>
+            <div style={S.list}>{threads.length===0&&<div style={S.emTxt}>スレッドがありません</div>}
+              {threads.map((t) => (<div key={t.id} onClick={()=>{setSelId(t.id);setActTw(t.tweets[0]?.id);}} style={{...S.li,borderColor:selId===t.id?"#e11d48":"transparent",background:selId===t.id?"rgba(225,29,72,0.06)":"transparent"}}>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}><span style={S.catB}>{t.category}</span><span style={S.cntB}>{t.tweets.length}tw</span><span style={S.cntB}>{t.tweets.reduce((a,tw)=>a+tw.images.length,0)}img</span><button onClick={(e)=>{e.stopPropagation();delThread(t.id);}} style={{marginLeft:"auto",background:"none",border:"none",color:"#6b7280",fontSize:11}}>✕</button></div>
+                <div style={{fontSize:12,color:"#d4d4d4",lineHeight:1.5}}>{t.name||t.tweets[0]?.content?.slice(0,50)||"（未入力）"}</div>
+                <div style={{fontSize:10,color:"#4b5563",fontFamily:"'IBM Plex Mono',monospace",marginTop:4}}>{new Date(t.updatedAt).toLocaleString("ja-JP")}</div>
+              </div>))}
+            </div>
+          </>) : (<div style={S.list}>{history.length===0&&<div style={S.emTxt}>送信履歴がありません</div>}
+            {history.map((en) => (<div key={en.id} style={S.tc}>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}><span style={S.catB}>{en.category}</span><span style={S.cntB}>{en.tweetCount}tw</span></div>
+              <div style={{fontSize:13,fontWeight:700,color:"#f0f0f0",marginBottom:4}}>{en.name}</div>
+              <div style={{fontSize:10,color:"#16a34a",fontFamily:"'IBM Plex Mono',monospace",marginBottom:8}}>{"✓ "+new Date(en.sentAt).toLocaleString("ja-JP")}</div>
+              <div style={{display:"flex",gap:6}}><button onClick={()=>setShowHist(en)} style={S.tUse}>詳細</button><button onClick={()=>reuseHist(en)} style={{...S.tUse,background:"#2563eb"}}>再利用</button><button onClick={()=>setHistory((p)=>p.filter((x)=>x.id!==en.id))} style={S.tDel}>削除</button></div>
+            </div>))}
+          </div>)}
+        </aside>
+        <main style={S.editor}>
+          {!sel ? (<div style={S.emEd}><div style={{fontSize:56,color:"#1a1a2e",marginBottom:12}}>✦</div><div style={{fontSize:16,fontWeight:600,color:"#555"}}>スレッドを選択または新規作成</div></div>
+          ) : (<div style={S.edIn} key={sel.id}>
+            <div style={S.tb}>
+              <input value={sel.name} onChange={(e)=>updateThread("name",e.target.value)} placeholder="スレッド名" style={S.nmIn} />
+              <select value={sel.category} onChange={(e)=>updateThread("category",e.target.value)} style={S.slct}>{CATS.map((c)=><option key={c}>{c}</option>)}</select>
+              <div style={{flex:1}} />
+              <button onClick={()=>setShowPrev(true)} style={S.aBtn}>👁 プレビュー</button>
+              <button onClick={markSent} style={{...S.aBtn,background:"#16a34a"}}>✓ 送信済</button>
+              <button onClick={copyThread} style={S.aBs}>📋 全コピー</button>
+            </div>
+            <ImageLib images={images} onUpload={(f)=>processFiles(f)} onUploadFolder={(f)=>processFiles(f)} onRemove={(id)=>setImages((p)=>p.filter((x)=>x.id!==id))} onInsert={insertToActive} onBulkAdd={addScraped} flash={flash} />
+            {images.length > 0 && sel && <button onClick={bulkAssign} style={S.bulkBtn}>{"📸 一括割り当て: "+bSum}</button>}
+
+            {/* Mismatch */}
+            {sel && (()=>{const ts=sel.tweets.reduce((a,tw)=>a+tw.imgSlots,0);const ta=sel.tweets.reduce((a,tw)=>a+tw.images.length,0);if(!ta&&!ts)return null;const ws=[];if(ta!==ts)ws.push({t:ta<ts?"s":"o",m:ta<ts?"画像が "+(ts-ta)+"枚 不足":"画像が "+(ta-ts)+"枚 超過"});sel.tweets.forEach((tw,i)=>{if(tw.images.length!==tw.imgSlots&&(tw.images.length>0||ta>0))ws.push({t:tw.images.length<tw.imgSlots?"s":"o",m:(i===0?"メイン":"リプ#"+i)+": 設定"+tw.imgSlots+" / 割当"+tw.images.length});});if(!ws.length)return null;const dg=ws.some((w)=>w.t==="o");return <div style={{margin:"8px 0",padding:"10px 14px",borderRadius:8,background:dg?"#2d0a0a":"#2d1f0a",border:"1px solid "+(dg?"#7f1d1d":"#78350f")}}><div style={{fontSize:12,fontWeight:700,color:dg?"#f87171":"#fbbf24",marginBottom:6}}>⚠ 画像枚数の不一致</div>{ws.map((w,i)=><div key={i} style={{fontSize:11,color:w.t==="o"?"#fca5a5":"#fde68a",lineHeight:1.7,paddingLeft:8,borderLeft:"2px solid "+(w.t==="o"?"#ef4444":"#f59e0b"),marginBottom:4}}>{w.m}</div>)}</div>;})()}
+
+            <div style={{display:"flex",flexDirection:"column",gap:0,marginTop:12}}>
+              {sel.tweets.map((tw, idx) => {const over=tw.content.length>MAX_CHARS;const isA=actTw===tw.id;return (
+                <div key={tw.id} onClick={()=>setActTw(tw.id)} style={{...S.twC,borderColor:isA?"#e11d48":"#1a1a20"}}>
+                  {idx>0&&<div style={{position:"absolute",top:-8,left:30,width:2,height:8,background:"#2a2a35"}} />}
+                  <div style={S.twH}>
+                    <div style={S.twN}>{idx+1}</div>
+                    <span style={{fontSize:12,fontWeight:600,color:"#9ca3af"}}>{idx===0?"メインツイート":"リプライ #"+idx}</span>
+                    <span style={{fontSize:11,fontFamily:"'IBM Plex Mono',monospace",color:over?"#ef4444":"#6b7280"}}>{tw.content.length+"/"+MAX_CHARS}</span>
+                    <div style={{marginLeft:"auto",display:"flex",gap:3}}>
+                      <button onClick={(e)=>{e.stopPropagation();copySingle(tw);}} style={S.mBtn}>📋</button>
+                      <button onClick={(e)=>{e.stopPropagation();moveTweet(idx,-1);}} disabled={idx===0} style={{...S.mBtn,opacity:idx===0?0.25:1}}>↑</button>
+                      <button onClick={(e)=>{e.stopPropagation();moveTweet(idx,1);}} disabled={idx===sel.tweets.length-1} style={{...S.mBtn,opacity:idx===sel.tweets.length-1?0.25:1}}>↓</button>
+                      {sel.tweets.length>1&&<button onClick={(e)=>{e.stopPropagation();removeTweet(tw.id);}} style={{...S.mBtn,color:"#ef4444"}}>✕</button>}
+                    </div>
+                  </div>
+                  <textarea value={tw.content} onChange={(e)=>updateTweet(tw.id,"content",e.target.value)} placeholder="ツイート本文を入力…" style={S.ta} rows={4} />
+                  <RiskBadges content={tw.content} />
+                  <div style={{marginTop:10}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                      <label style={S.mLbl}>🖼 画像枚数</label>
+                      <div style={{display:"flex",gap:2}}>{[1,2,3,4].map((n)=>(<button key={n} onClick={(e)=>{e.stopPropagation();updateTweet(tw.id,"imgSlots",n);if(tw.images.length>n)updateTweet(tw.id,"images",tw.images.slice(0,n));}} style={{width:30,height:28,border:"1.5px solid",borderRadius:5,fontSize:12,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",background:tw.imgSlots===n?"#e11d48":"#141418",borderColor:tw.imgSlots===n?"#e11d48":"#2a2a32",color:tw.imgSlots===n?"#fff":"#6b7280"}}>{n}</button>))}</div>
+                      <span style={{fontSize:10,fontWeight:600,padding:"1px 6px",borderRadius:3,color:tw.images.length===tw.imgSlots?"#22c55e":tw.images.length>tw.imgSlots?"#ef4444":"#f59e0b",background:tw.images.length===tw.imgSlots?"rgba(34,197,94,0.1)":tw.images.length>tw.imgSlots?"rgba(239,68,68,0.1)":"rgba(245,158,11,0.1)"}}>{(tw.images.length===tw.imgSlots?"✓ ":tw.images.length>tw.imgSlots?"⚠ ":"△ ")+tw.images.length+"/"+tw.imgSlots+"枚"}</span>
+                    </div>
+                    {tw.images.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>{tw.images.map((src,ii)=>(<div key={ii} style={{position:"relative",width:72,height:72,borderRadius:8,overflow:"hidden",border:"1px solid #2a2a32"}}><img src={src} alt="" style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} /><button onClick={(e)=>{e.stopPropagation();removeImg(tw.id,ii);}} style={{position:"absolute",top:2,right:2,background:"rgba(0,0,0,.7)",border:"none",color:"#fff",fontSize:9,width:18,height:18,borderRadius:"50%"}}>✕</button></div>))}</div>}
+                    {tw.images.length<tw.imgSlots&&<div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <button onClick={(e)=>{e.stopPropagation();if(!sfRef.current){sfRef.current=document.createElement("input");sfRef.current.type="file";sfRef.current.accept="image/*";sfRef.current.multiple=true;}sfRef.current.onchange=async(ev)=>{const files=Array.from(ev.target.files||[]).slice(0,tw.imgSlots-tw.images.length);const ni=[];for(const f of files){const d=await readFile(f);if(d)ni.push(d);}updateTweet(tw.id,"images",[...tw.images,...ni]);};sfRef.current.click();}} style={S.upBtn}>＋ 画像追加</button>
+                      <span style={{fontSize:10,color:"#4b5563"}}>{"あと"+(tw.imgSlots-tw.images.length)+"枚"}</span>
+                    </div>}
+                  </div>
+                  <div style={{marginTop:8}}><label style={S.mLbl}>🔗 アフィリエイトURL</label><input type="url" value={tw.affiliateUrl} onChange={(e)=>updateTweet(tw.id,"affiliateUrl",e.target.value)} placeholder="https://example.com/?ref=..." style={S.mIn} /></div>
+                </div>
+              );})}
+              <button onClick={addTweet} style={S.addBtn}>＋ リプライを追加</button>
+            </div>
+          </div>)}
+        </main>
+      </div>
+      <Preview tweets={sel?.tweets||[]} show={showPrev} onClose={()=>setShowPrev(false)} />
+      {showHist&&<div style={S.overlay} onClick={()=>setShowHist(null)}><div style={S.modal} onClick={(e)=>e.stopPropagation()}>
+        <div style={S.mHead}><span style={{fontSize:15,fontWeight:700,color:"#e7e9ea"}}>送信履歴詳細</span><button onClick={()=>setShowHist(null)} style={S.mClose}>✕</button></div>
+        <div style={S.mBody}>{showHist.tweets.map((tw,i)=>(<div key={tw.id} style={{display:"flex",padding:"12px 16px 4px",gap:12}}><div style={{display:"flex",flexDirection:"column",alignItems:"center",flexShrink:0}}><div style={S.xAv}>A</div>{i<showHist.tweets.length-1&&<div style={{width:2,flex:1,background:"#333639",marginTop:4}} />}</div><div style={{flex:1,minWidth:0,paddingBottom:12}}><div style={{fontWeight:700,fontSize:14,color:"#e7e9ea",marginBottom:4}}>アカウント名</div>{i>0&&<div style={{fontSize:13,color:"#71767b",marginBottom:2}}>返信先: <span style={{color:"#1d9bf0"}}>@your_handle</span></div>}<div style={{fontSize:14,lineHeight:1.6,color:"#e7e9ea",whiteSpace:"pre-wrap",wordBreak:"break-word",marginBottom:8}}>{tw.content}</div><ImgGrid imgs={tw.images||[]} /></div></div>))}
+          <div style={{padding:"12px 18px"}}><button onClick={()=>{reuseHist(showHist);setShowHist(null);}} style={{...S.aBtn,width:"100%"}}>🔄 再利用</button></div>
+        </div>
+      </div></div>}
+    </div>
+  );
+}
+
+const S = {
+  root:{fontFamily:"'Noto Sans JP',sans-serif",background:"#08080a",color:"#e5e5e5",height:"100vh",display:"flex",flexDirection:"column",overflow:"hidden"},
+  toast:{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",background:"#16a34a",color:"#fff",padding:"8px 24px",borderRadius:8,fontSize:13,fontWeight:600,zIndex:2000,animation:"fadeIn .2s ease",boxShadow:"0 4px 24px rgba(0,0,0,.6)"},
+  header:{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 20px",borderBottom:"1px solid #18181c",background:"#0c0c0f",flexShrink:0},
+  ver:{fontSize:9,fontWeight:700,color:"#e11d48",background:"#1c0a10",border:"1px solid #3b0a1a",borderRadius:4,padding:"1px 5px"},
+  hBtn:{padding:"6px 14px",background:"#141418",border:"1px solid #252529",borderRadius:6,color:"#9ca3af",fontSize:11,display:"flex",alignItems:"center",gap:4},
+  layout:{display:"flex",flex:1,overflow:"hidden"},
+  side:{width:310,minWidth:310,borderRight:"1px solid #18181c",display:"flex",flexDirection:"column",background:"#0a0a0d"},
+  tabs:{display:"flex",borderBottom:"1px solid #18181c"},
+  tabBtn:{flex:1,padding:"11px 0",background:"transparent",border:"none",borderBottom:"2px solid transparent",color:"#6b7280",fontSize:13,fontWeight:600},
+  newBtn:{margin:"12px 12px 0",padding:"10px 0",background:"#e11d48",color:"#fff",border:"none",borderRadius:7,fontSize:13,fontWeight:700},
+  list:{flex:1,overflowY:"auto",padding:"10px 12px",display:"flex",flexDirection:"column",gap:6},
+  emTxt:{textAlign:"center",color:"#444",fontSize:12,marginTop:40,lineHeight:2},
+  li:{padding:"10px 12px",borderRadius:8,border:"1.5px solid transparent",cursor:"pointer",animation:"fadeIn .2s ease"},
+  catB:{fontSize:10,fontWeight:600,padding:"1px 6px",borderRadius:3,background:"rgba(225,29,72,0.1)",color:"#f87171"},
+  cntB:{fontSize:10,color:"#6b7280",fontFamily:"'IBM Plex Mono',monospace"},
+  tc:{padding:"12px 14px",borderRadius:8,background:"#111115",border:"1px solid #1e1e24",animation:"fadeIn .2s ease",marginBottom:4},
+  tUse:{flex:1,padding:"7px 0",background:"#e11d48",border:"none",borderRadius:5,color:"#fff",fontSize:11,fontWeight:600},
+  tDel:{padding:"7px 10px",background:"transparent",border:"1px solid #333",borderRadius:5,color:"#6b7280",fontSize:11},
+  editor:{flex:1,overflowY:"auto",background:"#08080a"},
+  emEd:{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",color:"#555"},
+  edIn:{padding:"20px 28px 60px",maxWidth:780,margin:"0 auto",animation:"fadeIn .3s ease"},
+  tb:{display:"flex",alignItems:"center",gap:8,marginBottom:16,flexWrap:"wrap"},
+  nmIn:{padding:"7px 12px",background:"#111114",border:"1.5px solid #252529",borderRadius:7,color:"#f0f0f0",fontSize:14,fontWeight:600,fontFamily:"'Noto Sans JP',sans-serif",width:200},
+  slct:{padding:"7px 10px",background:"#111114",border:"1.5px solid #252529",borderRadius:7,color:"#d4d4d4",fontSize:12,fontFamily:"'Noto Sans JP',sans-serif"},
+  aBtn:{padding:"7px 14px",background:"#e11d48",border:"none",borderRadius:6,color:"#fff",fontSize:12,fontWeight:600},
+  aBs:{padding:"7px 14px",background:"#141418",border:"1px solid #2a2a32",borderRadius:6,color:"#d4d4d4",fontSize:12,fontWeight:500},
+  scraperWrap:{background:"#0c0f14",border:"1px solid #1a2a3a",borderRadius:12,padding:"14px 16px",marginBottom:10},
+  urlTa:{width:"100%",padding:"10px 12px",background:"#111118",border:"1.5px solid #1e2636",borderRadius:7,color:"#e5e5e5",fontSize:12,lineHeight:1.7,resize:"vertical",fontFamily:"'IBM Plex Mono',monospace",minHeight:80},
+  libBtnU:{padding:"6px 14px",background:"#0c1420",border:"1px solid #1a3050",borderRadius:6,color:"#60a5fa",fontSize:11,fontWeight:600},
+  libW:{background:"#0e0e12",border:"1px solid #1a1a20",borderRadius:12,padding:"14px 16px",marginBottom:8},
+  libBtn:{padding:"6px 14px",background:"#0f1a12",border:"1px solid #1a4a2a",borderRadius:6,color:"#86efac",fontSize:11,fontWeight:600},
+  libBtnP:{padding:"6px 14px",background:"#1a0a28",border:"1px solid #4c1d95",borderRadius:6,color:"#c4b5fd",fontSize:11,fontWeight:600},
+  bulkBtn:{width:"100%",padding:"10px 14px",background:"#1a0a28",border:"1.5px solid #4c1d95",borderRadius:8,color:"#c4b5fd",fontSize:12,fontWeight:600,marginBottom:4,textAlign:"left"},
+  twC:{position:"relative",padding:"18px 20px",background:"#0e0e12",borderRadius:12,border:"1.5px solid #1a1a20",marginBottom:8,animation:"fadeIn .25s ease",cursor:"pointer",transition:"border-color .15s"},
+  twH:{display:"flex",alignItems:"center",gap:8,marginBottom:10},
+  twN:{width:26,height:26,borderRadius:"50%",background:"linear-gradient(135deg,#e11d48,#9333ea)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:800,color:"#fff",flexShrink:0},
+  mBtn:{background:"#141418",border:"1px solid #252529",borderRadius:4,color:"#9ca3af",padding:"3px 7px",fontSize:11},
+  ta:{width:"100%",padding:"12px 14px",background:"#141418",border:"1.5px solid #1e1e26",borderRadius:8,color:"#f0f0f0",fontSize:13,lineHeight:1.8,resize:"vertical",fontFamily:"'Noto Sans JP',sans-serif",minHeight:100},
+  mLbl:{fontSize:11,fontWeight:500,color:"#6b7280",marginBottom:5,marginRight:4},
+  upBtn:{padding:"6px 12px",background:"#1a1a20",border:"1px solid #2a2a32",borderRadius:6,color:"#d4d4d4",fontSize:11},
+  mIn:{padding:"7px 10px",background:"#141418",border:"1px solid #1e1e26",borderRadius:6,color:"#e5e5e5",fontSize:12,fontFamily:"'Noto Sans JP',sans-serif",width:"100%"},
+  addBtn:{padding:"12px 0",background:"transparent",border:"2px dashed #252529",borderRadius:10,color:"#6b7280",fontSize:13,fontWeight:600,marginTop:4},
+  overlay:{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,backdropFilter:"blur(4px)"},
+  modal:{background:"#16181c",borderRadius:16,width:"100%",maxWidth:520,maxHeight:"85vh",display:"flex",flexDirection:"column",border:"1px solid #2f3336",overflow:"hidden"},
+  mHead:{display:"flex",alignItems:"center",gap:10,padding:"14px 18px",borderBottom:"1px solid #2f3336"},
+  mClose:{marginLeft:"auto",background:"none",border:"none",color:"#e7e9ea",fontSize:18,padding:"4px 8px"},
+  mBody:{overflowY:"auto",padding:"0 0 16px"},
+  xAv:{width:40,height:40,borderRadius:"50%",background:"linear-gradient(135deg,#e11d48,#7c3aed)",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,fontSize:16,color:"#fff"},
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
